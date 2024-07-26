@@ -1,0 +1,407 @@
+---
+title: "EV Charging Stations"
+output: html_document
+date: "2024-07-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r load packages}
+library(tidyverse)
+library(forecast)
+library(reshape2)
+library(scales)
+library(sf)
+library(RColorBrewer)
+library(grid)
+library(gridExtra)
+```
+
+```{r load and prep data}
+
+set.seed(123) # prepare for modeling
+
+# load data and clean column names and contents
+EVs_all <- read_csv("alt_fuel_stations (Jul 25 2024).csv") %>%
+  rename("Level 1" = "EV Level1 EVSE Num") %>%
+  rename("Level 2" = "EV Level2 EVSE Num") %>%
+  rename("Level 3 (DC Fast)" = "EV DC Fast Count") %>%
+  mutate(`Level 1` = ifelse(is.na(`Level 1`), 0, `Level 1`)) %>%
+  mutate(`Level 2` = ifelse(is.na(`Level 2`), 0, `Level 2`)) %>%
+  mutate(`Level 3 (DC Fast)` = ifelse(is.na(`Level 3 (DC Fast)`), 0, `Level 3 (DC Fast)`)) %>%
+  select(`State`, `Level 1`, `Level 2`, `Level 3 (DC Fast)`, `Open Date`, `EV Pricing`, `Maximum Vehicle Class`, `Federal Funding Types`, `Status Code`, `Federal Funding Types`)
+
+# create year column
+EVs_all$`Open Date` <- as.Date(EVs_all$`Open Date`, format = "%m/%d/%Y")
+EVs_all$`Open Date Year` <- format(as.Date(EVs_all$`Open Date`, format = "%m/%d/%Y"),"%Y")
+
+# create column summing total ports at charging stations
+EVs_all$`Total Ports` <- EVs_all$`Level 1` + EVs_all$`Level 2` + EVs_all$`Level 3 (DC Fast)`
+
+```
+
+
+```{r ARIMA forecasting}
+
+# available EV stations
+EVs_all_available <- EVs_all %>%
+  filter(`Status Code` == "E")
+
+# EV stations opened by day
+EVs_all_count <- EVs_all_available %>%
+  group_by(`Open Date`) %>%
+  tally()
+
+# filter for more recent openings (last 4 years)
+EVs_all_2024_forecast <- EVs_all_count %>%
+  filter(`Open Date` < "2024-07-01") %>%
+  filter(`Open Date` > "2021-12-31") %>%
+  arrange(`Open Date`)
+
+# create dummy column of dates to backfill missing dates in data with 0s
+values = as.data.frame(seq(from = as.Date("2022-01-01"), to = as.Date("2024-06-30"), by = 'day')) %>%
+  rename("Open Date" = 'seq(from = as.Date("2022-01-01"), to = as.Date("2024-06-30"), by = "day")')
+
+EVs_all_2024_forecast <- full_join(EVs_all_2024_forecast, values) %>%
+  arrange(`Open Date`) %>%
+  mutate(n = ifelse(is.na(n), 0, n))
+
+EVs_all_2024_forecast <- EVs_all_2024_forecast %>%
+  rename("Number of Stations Opened" = "n") %>%
+  rename("Date" = "Open Date")
+
+EVs_all_2024_forecast$Month_Year <- format(as.Date(EVs_all_2024_forecast$Date, format = "%Y/%m/%d"),"%m/%Y")
+
+EVs_all_2024_forecast <- EVs_all_2024_forecast %>%
+  group_by(Month_Year) %>%
+  summarize(`Number of Stations Opened (by month)` = sum(`Number of Stations Opened`))
+
+fit <- auto.arima(EVs_all_2024_forecast[, "Number of Stations Opened (by month)"], seasonal = FALSE)
+
+predicted_values <- as.data.frame(forecast(fit, 6)) %>%
+  select(`Point Forecast`, `Lo 80`, `Hi 80`)
+
+rownames(predicted_values) <- NULL
+
+dummy_data_1 <- data.frame(`one` = rep(0, times = 30), `two` = rep(0, times = 30), `three` = rep(0, times = 30)) %>%
+  rename("Point Forecast" = "one") %>%
+  rename("Lo 80" = "two") %>%
+  rename("Hi 80" = "three")
+
+predicted_values <- rbind(dummy_data_1, predicted_values)
+
+dummy_data_2 <- data.frame(Month_Year = c("07/2024", "08/2024", "09/2024", "10/2024", "11/2024", "12/2024"), `Number of Stations Opened (by Month)` = rep(0, times = 6)) %>%
+  rename("Number of Stations Opened (by month)" = "Number.of.Stations.Opened..by.Month.")
+
+EVs_all_2024_forecast <- rbind(EVs_all_2024_forecast, dummy_data_2)
+
+EVs_all_2024_forecast <- cbind(EVs_all_2024_forecast, predicted_values)
+
+EVs_all_2024_forecast$Date <- my(EVs_all_2024_forecast$Month_Year)
+
+EVs_all_2024_forecast <- EVs_all_2024_forecast %>%
+  arrange(Date)
+
+EVs_all_2024_forecast[EVs_all_2024_forecast == 0] <- NA
+
+EVs_all_2024_forecast[31, 2] = 986.6667
+
+background_color = "#f9f2eb"
+accent_color_1 = "#006400"
+accent_color_2 = "#cfe6ce"
+accent_color_3 = "#ADD8E6"
+
+line_graph <- ggplot(EVs_all_2024_forecast, aes(x = Date, y = `Number of Stations Opened (by month)`)) +
+  geom_line(group = 1) +
+  geom_ribbon(aes(ymin = `Lo 80`, ymax = `Hi 80`), fill = accent_color_2, group = 1) +
+  geom_line(aes(y = `Point Forecast`, group = 1), colour = accent_color_1) +
+  geom_point(size = 3) +
+  geom_curve(aes(x = as.Date("2024-08-01"), xend = as.Date("2024-10-01"), y = 630, yend = 739.9125),
+             arrow = arrow(length = unit(2, "mm")),
+             size = 0.5,
+             color = accent_color_1,
+             curvature = 0.4) +
+  geom_curve(aes(x = as.Date("2024-07-01"), xend = as.Date("2024-09-15"), y = 600, yend = 1250),
+             arrow = arrow(length = unit(2, "mm")),
+             size = 0.5,
+             color = accent_color_1,
+             curvature = -0.2) +
+  geom_label(aes(x = as.Date("2023-12-01"), y = 640),
+             label = "Predicted range of new station openings",
+             family = "serif",
+             size = 5,
+             fill = accent_color_2) +
+   scale_x_date(breaks = c(as.Date("2022-01-01"), as.Date("2023-01-01"), as.Date("2024-01-01")), date_labels = "%Y") +
+  labs(title = "\nNewly Opened Electric Vehicle (EV) Charging Stations\n(January 2022 - June 2024)",
+       subtitle = "While openings of new EV charging stations were increasing from 2022 into 2023,\nthe upward trend has not yet continued into 2024. From January 1, 2023 to\nJune 30, 2024, only 18 stations were opened through the 2021 National Electric\nVehicle Infrastructure Formula Program (NEVI). The modeled range estimates lower\nand upper bounds of new station openings for the next 6 months (80% intervals).\n") +
+  theme(plot.background = element_rect(background_color),
+        panel.background = element_rect(background_color),
+        plot.title = element_text(size = 20, face = "bold"),
+        plot.subtitle = element_text(size = 12, face = "italic"),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        text = element_text(family = "serif"))
+
+```
+
+```{r bar graph - number of stations, NEVI}
+
+EVs_total <- EVs_all %>%
+  group_by(`Status Code`) %>%
+  tally()
+
+EVs_total_graph <- melt(EVs_total, id.vars = "n", variable = "Status Code") %>%
+  mutate(value = case_when(value == "T" ~ "Temporarily Unavailable",
+                   value == "E" ~ "Open Station"))
+
+n <- 5000
+`Status Code` <- "Status Code"
+value <- "NEVI Estimate"
+
+NEVI <- data.frame(n, `Status Code`, value) %>%
+  rename("Status Code" = "Status.Code")
+
+bar_graph <- rbind(EVs_total_graph, NEVI)
+
+bar_graph$value <- factor(bar_graph$value, levels = c("NEVI Estimate", "Temporarily Unavailable",  "Open Station"))
+
+bar_graph <- ggplot(bar_graph) +
+  geom_col(aes(x = 1, y = n, fill = value)) +
+  coord_flip() +
+  geom_curve(aes(x = 1.3, xend = 1.25, y = 75000, yend = 79000),
+             arrow = arrow(length = unit(2, "mm")),
+             size = 0.75,
+             color = accent_color_3,
+             curvature = -0.4) +
+  geom_curve(aes(x = 1, xend = 1, y = 65426, yend = 60000),
+             arrow = arrow(length = unit(2, "mm")),
+             size = 0.75,
+             color = accent_color_1,
+             curvature = -0.4) +
+    geom_hline(yintercept = 70963, size = 1) +
+  geom_label(aes(x = 1, y = 84000),
+             label = "Estimated\nadditional\nstations\n(5,000)", size = 3.5, family = "serif", fill = accent_color_3) +
+  geom_label(aes(x = 1, y = 50000), label = "Currently, about\n5,500 stations are\ntemporarily unavailable", size = 4, family = "serif", color = accent_color_1) +
+  scale_fill_manual(values = c(accent_color_3, accent_color_1, accent_color_2)) +
+  scale_y_continuous(breaks = c(70963), label = comma) +
+  labs(title = "\n  How many charging stations are there in total?",
+       subtitle = "     There are almost 80,000 charging stations across the US, both active and inactive.\n     2021 EV investments from NEVI and other sources, which totaled $7.5B, were\n     expected to build about 5,000 new stations (Atlas Public Policy).\n") +
+  xlab("Year Stations Opened") +
+  theme(plot.background = element_rect(background_color),
+        panel.background = element_rect(background_color),
+        legend.background = element_rect(background_color),
+        panel.grid = element_line(background_color),
+        plot.title = element_text(face = "bold", size = 22),
+        plot.subtitle = element_text(face = "italic"),
+        axis.title = element_blank(),
+        axis.text.x = element_text(size = 16),
+        axis.ticks.length = unit(0.5, "cm"),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "top",
+        legend.text = element_text(size = 12),
+        text = element_text(family = "serif"),
+        legend.margin=margin(t = 0, unit='cm')) +
+  guides(fill = guide_legend(reverse = TRUE))
+
+combined_graphs <- grid.arrange(line_graph, bar_graph, ncol = 1, heights = c(0.6, 0.4),
+  bottom = textGrob(
+    "\nSource: US Department of Transportation | github: julia-tache | July 25th, 2024     \n",
+    gp = gpar(fontsize = 14, fontfamily = "serif"),
+    hjust = 1,
+    x = 1))
+
+cowplot::ggdraw(combined_graphs) +
+  theme(plot.background = element_rect(fill = background_color, color = NA))
+
+ggsave("bar_graphs.png", height = 9, width = 8)
+
+```
+
+
+```{r bar graphs - vehicle accessibility and charging level}
+
+EVs_all_bar_graph_1 <- EVs_all %>%
+  filter(`Status Code` == "E") %>%
+  group_by(`Maximum Vehicle Class`) %>%
+  tally()
+
+EVs_all_bar_graph_1 <- na.omit(EVs_all_bar_graph_1)
+
+EVs_all_bar_graph_1$`Maximum Vehicle Class` <- str_replace(EVs_all_bar_graph_1$`Maximum Vehicle Class`, "LD", "Passenger Vehicles")
+EVs_all_bar_graph_1$`Maximum Vehicle Class` <- str_replace(EVs_all_bar_graph_1$`Maximum Vehicle Class`, "MD", "Medium-Duty")
+EVs_all_bar_graph_1$`Maximum Vehicle Class` <- str_replace(EVs_all_bar_graph_1$`Maximum Vehicle Class`, "HD", "Heavy-Duty")
+
+bar_graph_1 <- EVs_all_bar_graph_1 %>%
+  ggplot(aes(x = reorder(`Maximum Vehicle Class`, -n), y = n)) +
+  geom_col(fill = accent_color_2) +
+  geom_text(aes(label = paste0(prettyNum(n, big.mark = ","), " stations")), size = 5, fontface = "bold", color = accent_color_1, family = "serif", vjust = -0.25) +
+  ylim(0, 10000) +
+  labs(title = "\nEV Charging Stations: Vehicle Accessibility",
+       subtitle = "Most electric charging stations have the capacity to service low-duty passenger vehicles,\nbut not heavy-duty commercial vehicles like trucks.\n",
+       caption = "\nSource: US Department of Transportation | github: julia-tache | July 25th, 2024") +
+  xlab("\nMaximum Vehicle Class Serviced by Station") +
+  theme(plot.background = element_rect(background_color),
+        panel.background = element_rect(background_color),
+        plot.title = element_text(size = 18, face = "bold"),
+        plot.subtitle = element_text(face = "italic"),
+        plot.caption = element_text(size = 10),
+        axis.title.x = element_text(size = 12, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        text = element_text(family = "serif"))
+
+ggsave("bar_graph_1.png", bar_graph_1, height = 5, width = 8)
+
+EVs_all_bar_graph_2 <- EVs_all %>%
+  select(`Open Date Year`, `Level 1`, `Level 2`, `Level 3 (DC Fast)`)
+
+EVs_all_bar_graph_2_long <- melt(EVs_all_bar_graph_2, id.vars = "Open Date Year", variables = c("Level 1", "Level 2", "Level 3 (DC Fast)")) %>%
+  rename("Charger Type" = "variable")
+
+EVs_all_bar_graph_2_long$`Open Date Year` <- as.numeric(EVs_all_bar_graph_2_long$`Open Date Year`)
+
+bar_graph_2 <- EVs_all_bar_graph_2_long %>%
+  filter(`Open Date Year` > 2013) %>%
+  filter(`Open Date Year` < 2024) %>%
+  ggplot(aes(x = `Open Date Year`, y = value)) +
+  geom_col(aes(fill = `Charger Type`), alpha = 1) +
+  scale_fill_manual(values = c(accent_color_1, accent_color_2, accent_color_3)) +
+  scale_x_continuous(breaks = seq(2014, 2023, 1)) +
+  labs(title = "\nEV Charging Stations: Number and Type of Charging Ports",
+       subtitle = "The number of available Level 3 (DC Fast) chargers has increased in the last 10 years.\n",
+       caption = "\nSource: US Department of Transportation | github: julia-tache | July 25th, 2024") +
+  xlab("Year Station Opened") +
+  theme(plot.background = element_rect(background_color),
+        panel.background = element_rect(background_color),
+        legend.background = element_rect(background_color),
+        plot.title = element_text(size = 18, face = "bold"),
+        plot.subtitle = element_text(face = "italic"),
+        plot.caption = element_text(size = 10),
+        axis.title.x = element_text(size = 12, face = "bold"),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        legend.position = "top",
+        legend.text = element_text(size = 10),
+        text = element_text(family = "serif"))
+
+ggsave("bar_graph_2.png", bar_graph_2, height = 5, width = 9)
+
+
+```
+
+
+```{r hexbin maps}
+
+# coding help from https://r-graph-gallery.com/328-hexbin-map-of-the-usa.html
+
+my_sf <- read_sf("us_states_hexgrid.geojson")
+
+# Bit of reformatting
+my_sf <- my_sf %>%
+  mutate(google_name = gsub(" \\(United States\\)", "", google_name))
+
+EVs_all$`Open Date Year` <- as.numeric(EVs_all$`Open Date Year`)
+
+EVs_count_2004_2013 <- EVs_all %>%
+  filter(`Open Date Year` > 2003) %>%
+  filter(`Open Date Year` < 2014) %>%
+  group_by(State) %>%
+  tally()
+
+# Merge geospatial and numerical information
+EVs_count_2004_2013 <- my_sf %>%
+  left_join(EVs_count_2004_2013, by = c("iso3166_2" = "State"))
+
+# Prepare binning
+EVs_count_2004_2013$bin <- cut(EVs_count_2004_2013$n,
+  breaks = c(0, 1, 10, 50, 100, 200, 300, 400),
+  labels = c("1", "2-10", "11-50", "51-100", "101-200", "201-300", "300+"),
+  include.lowest = TRUE
+)
+
+# Prepare a color scale coming from the viridis color palette
+library(viridis)
+my_palette <- rev(viridis(8))[c(-1, -8)]
+
+# plot
+map_2004_2013 <- ggplot(EVs_count_2004_2013) +
+  geom_sf(aes(fill = bin), linewidth = 0, alpha = 0.9) +
+  geom_sf_text(aes(label = iso3166_2), fontface = "bold", color = "white", size = 3, alpha = 0.6) +
+  theme_void() +
+  scale_fill_manual(values = my_palette,
+                    guide = guide_legend(keyheight = unit(2, units = "mm"),
+                                         keywidth = unit(1, units = "mm"),
+                                         label.position = "bottom", nrow = 1)) +
+  ggtitle("2004 — 2013") +
+  theme(plot.background = element_rect(background_color, color = NA),
+        panel.background = element_rect(background_color, color = NA),
+        legend.background = element_rect(background_color, color = NA),
+        plot.title = element_text(size = 18, hjust = 0.5, margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm")),
+        legend.position = c(0.5, 0.9),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        text = element_text(family = "serif"))
+
+EVs_count_2014_2023 <- EVs_all %>%
+  filter(`Open Date Year` > 2013) %>%
+  filter(`Open Date Year` < 2024) %>%
+  group_by(State) %>%
+  tally()
+
+# Merge geospatial and numerical information
+EVs_count_2014_2023 <- my_sf %>%
+  left_join(EVs_count_2014_2023, by = c("iso3166_2" = "State"))
+
+# Prepare binning
+EVs_count_2014_2023$bin <- cut(EVs_count_2014_2023$n,
+  breaks = c(1, 100, 250, 500, 1000, 2500, 4000, 16000),
+  labels = c("50-100", "101-250", "251-500", "501-1,100", "1,001-2,500", "2,501-4,000", "15,000+"),
+  include.lowest = TRUE
+)
+
+# Prepare a color scale coming from the viridis color palette
+library(viridis)
+my_palette <- rev(viridis(9))[c(-1, -9)]
+
+# plot
+map_2014_2023 <- ggplot(EVs_count_2014_2023) +
+  geom_sf(aes(fill = bin), linewidth = 0, alpha = 0.9) +
+  geom_sf_text(aes(label = iso3166_2), fontface = "bold", color = "white", size = 3, alpha = 0.6) +
+  theme_void() +
+  scale_fill_manual(values = my_palette,
+                    guide = guide_legend(keyheight = unit(2, units = "mm"),
+                                         keywidth = unit(1, units = "mm"),
+                                         label.position = "bottom", nrow = 1)) +
+  ggtitle("2014 — 2023") +
+  theme(plot.background = element_rect(background_color, color = NA),
+        panel.background = element_rect(background_color, color = NA),
+        legend.background = element_rect(background_color, color = NA),
+        plot.title = element_text(size = 18, hjust = 0.5, margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm")),
+        legend.position = c(0.5, 0.9),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 11),
+        text = element_text(family = "serif"))
+
+combined_maps <- grid.arrange(map_2004_2013, map_2014_2023, ncol = 1,
+  top = textGrob("\nThe Growing Number of EV Charging Stations by State", gp = gpar(fontsize = 22, fontface = "bold", fontfamily = "serif")),
+  bottom = textGrob(
+    "\nSource: US Department of Transportation | github: julia-tache | July 25th, 2024     \n",
+    gp = gpar(fontsize = 12, fontfamily = "serif"),
+    hjust = 1,
+    x = 1))
+
+cowplot::ggdraw(combined_maps) +
+  theme(plot.background = element_rect(fill = background_color, color = NA))
+
+ggsave("EV_maps.png", height = 10, width = 9)
+
+```
+
